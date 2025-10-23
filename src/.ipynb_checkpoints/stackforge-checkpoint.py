@@ -9,6 +9,12 @@ from tqdm import tqdm
 from scipy.optimize import curve_fit
 import h5py
 
+import emcee
+import os
+import corner
+from pathos.multiprocessing import ProcessingPool as Pool
+
+
 from helpers import *
  
 class halo():
@@ -433,22 +439,6 @@ class stack():
                 if method == "lsq":
                     par, cov = curve_fit(model, R, P)
                     return par, np.sqrt(np.diag(cov))
-
-def random_initial_steps(limits, n, distribution = "uniform", ln_distribution = True,
-                nsamples = 1e4, dist_args = None):
-    if distribution == "uniform":
-        lower, upper = limits
-        params = np.random.uniform(lower, upper, size = n)
-    elif distribution == "fixed":
-        params = np.full(n, limits)
-    else:
-        assert nsamples > n, "nsamples must be greater than n"
-        x = np.linspace(limits[0], limits[1], int(nsamples))
-        weights = np.exp([distribution(xi, *dist_args) for xi in x]) if ln_distribution else [distribution(xi, *dist_args) for xi in x]
-        weights = np.nan_to_num(weights, np.nanmin(weights))
-        weights = weights/np.nansum(weights)
-        params = np.random.choice(x, p = weights, size = n)
-    return params
 
 
 class sampler():

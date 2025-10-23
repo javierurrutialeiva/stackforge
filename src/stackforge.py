@@ -9,6 +9,12 @@ from tqdm import tqdm
 from scipy.optimize import curve_fit
 import h5py
 
+import emcee
+import os
+import corner
+from pathos.multiprocessing import ProcessingPool as Pool
+
+
 from helpers import *
  
 class halo():
