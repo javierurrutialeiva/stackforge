@@ -21,10 +21,10 @@ class binner2D:
         if self.r.shape != p.shape:
             raise ValueError("r and p must have the same shape")
         
-        self.p = p if weights is None else p*weights
+        p = p if weights is None else p*weights
         if method == "histogram":
             r = self.r.ravel()
-            p = self.p.ravel()
+            p = p.ravel()
             counts, _ = np.histogram(r, bins=self.R_bins)
             sum_w, _ = np.histogram(r, bins=self.R_bins, weights=p)
         
@@ -84,10 +84,10 @@ class binner3D:
         """
         if self.r.shape != p.shape:
             raise ValueError("r and p must have the same shape")
-        self.p = p if weights is None else p*weights
+        p = p if weights is None else p*weights
         if method == "histogram":
             r = self.r.ravel()
-            p = self.p.ravel()
+            p = p.ravel()
             counts, _ = np.histogram(r, bins=self.R_bins)
             sum_w, _ = np.histogram(r, bins=self.R_bins, weights=p)
 
@@ -110,7 +110,7 @@ class binner3D:
         elif method == "where":
             prof = np.zeros(len(self.R_bins) - 1)
             r = self.r
-            p = self.p
+            p = p if weights is None else p*weights
             for i in range(len(self.R_bins) - 1):
                 ri = self.R_bins[i]
                 rf = self.R_bins[i+1]
