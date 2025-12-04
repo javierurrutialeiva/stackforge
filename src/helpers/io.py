@@ -260,147 +260,148 @@ def load_sub_volume(basePath, snapNum = None, partType='gas',
                     fields=["Coordinates"], load_halos=True, rmax=5e3,
                     halo_fields = None, verbose = True,
                     redshift = None, fix_boundary_condition = False, 
-                    geometry = "sphere"):
+                    geometry = "sphere", load_only_halos = False):
     if redshift is not None and snapNum is None:
         redshift_dict = load_redshifts(basePath)
         idx = np.argmin(np.abs(np.array(list(redshift_dict.values())) - redshift))
         snapNum = int(np.array(list(redshift_dict.keys()))[idx])
-    
-    ptNum = partTypeNum(partType)
-    gName = f"PartType{ptNum}"
-    if type(fields) is str and fields is not None:
-        fields = [fields]
-    elif type(fields) is list or type(fields) is tuple:
-        fields = list(fields)
-        if "Coordinates" not in fields:
-            fields.append("Coordinates")
+    if load_only_halos == False:
+        ptNum = partTypeNum(partType)
+        gName = f"PartType{ptNum}"
+        if type(fields) is str and fields is not None:
+            fields = [fields]
+        elif type(fields) is list or type(fields) is tuple:
+            fields = list(fields)
+            if "Coordinates" not in fields:
+                fields.append("Coordinates")
 
-    with h5py.File(snapPath(basePath, snapNum), 'r') as f:
-        header = dict(f['Header'].attrs.items())
-        BoxSize = header["BoxSize"]
-        nPart = getNumPart(header)
-        numToRead = nPart[ptNum]
-    
-        i = 1
-        while gName not in f and i < 1000:
-            f = h5py.File(snapPath(basePath, snapNum, i), 'r')
-            i += 1
+        with h5py.File(snapPath(basePath, snapNum), 'r') as f:
+            header = dict(f['Header'].attrs.items())
+            BoxSize = header["BoxSize"]
+            nPart = getNumPart(header)
+            numToRead = nPart[ptNum]
 
-        if fields is None:
-            fields = list(f[gName].keys())
-        
-        valid_fields = []
-        for field in fields:
-            if field in f[gName]:
-                valid_fields.append(field)
-            else:
-                if verbose:
-                    print(f"Warning: Field {field} not found in {gName}, skipping.")
-        fields = valid_fields
-    fileNum = 0
-    total_valid = 0
-    field_shapes = {}
-    field_dtypes = {}
-    cached_masks = {} 
-    chunk_stats = {}
-    file_handles = []
-    while True:
-        try:
-            f = h5py.File(snapPath(basePath, snapNum, fileNum), 'r') 
-            if gName not in f:
-                fileNum += 1
-                continue
+            i = 1
+            while gName not in f and i < 1000:
+                f = h5py.File(snapPath(basePath, snapNum, i), 'r')
+                i += 1
 
-            if not field_shapes:
-                if fields is None:
-                    fields = list(f[gName].keys())
-                else:
-                    valid_fields = [field for field in fields if field in f[gName]]
-                    if len(valid_fields) < len(fields):
-                        missing = set(fields) - set(valid_fields)
-                        if verbose:
-                            print(f"Warning: Fields {missing} not found, skipping.")
-                    fields = valid_fields
+            if fields is None:
+                fields = list(f[gName].keys())
 
-                for field in fields:
-                    field_shapes[field] = f[gName][field].shape[1:]  
-                    field_dtypes[field] = f[gName][field].dtype
-            coords = f[gName]['Coordinates'][:]
-            if fix_boundary_condition == True: 
-                coords = periodic_boundary_condition_fix_coordinates(pos, coords, BoxSize)   
-            mins = np.min(coords, axis=0)
-            maxs = np.max(coords, axis=0)
-            if geometry == "sphere":
-                closest_point = np.clip(pos, mins, maxs)
-                distance = np.linalg.norm(closest_point - pos)
-                overlap = distance <= boxSize/2.
-            else:
-                search_min = pos - boxSize/2.
-                search_max = pos + boxSize/2.
-                overlap_x = (mins[0] <= search_max[0]) and (maxs[0] >= search_min[0])
-                overlap_y = (mins[1] <= search_max[1]) and (maxs[1] >= search_min[1])
-                overlap_z = (mins[2] <= search_max[2]) and (maxs[2] >= search_min[2])
-
-                overlap = overlap_x and overlap_y and overlap_z
-
-            if overlap == False:
-                print(f"  Skipping chunk {fileNum}, there are no particles inside volume.")
-                fileNum+=1
-                continue                   
-            n_total = len(coords)
-            valid = compute_mask(coords, pos, boxSize, geometry)
-            idx = np.where(valid)[0]
-            n_valid = len(idx)
-
-            if n_valid > 0:
-                cached_masks[fileNum] = idx 
-                total_valid += n_valid
-                chunk_stats[fileNum] = (n_valid, n_total)
-                if verbose:
-                    print(f"  Chunk {fileNum}: {n_valid} particles")
-                
-            del valid, coords
-            file_handles.append(f)
-            fileNum += 1
-
-        except FileNotFoundError:
-            break
-    
-    if verbose:
-        print(f"Total valid particles: {total_valid}")
-    result = {}
-    for field in fields:
-        shape = (total_valid,) + field_shapes[field]
-        result[field] = np.empty(shape, dtype=field_dtypes[field])
-        if verbose:
-            print(f"Allocated {field}: {shape}, {result[field].nbytes / 1e9:.2f} GB")
-    if verbose:
-        print("\nSecond pass: loading data...")
-    stored = 0
-    for fileNum in sorted(cached_masks.keys()):
-        idx = cached_masks[fileNum]
-        n_valid, n_total = chunk_stats[fileNum]
-
-        with h5py.File(snapPath(basePath, snapNum, fileNum), 'r') as f:
-            coords = f[gName]['Coordinates'][:]
-            if fix_boundary_condition:
-                coords = periodic_boundary_condition_fix_coordinates(pos, coords, BoxSize)
+            valid_fields = []
             for field in fields:
-                if field == "Coordinates":
-                    extract_2d(coords, idx, result[field], stored)
+                if field in f[gName]:
+                    valid_fields.append(field)
                 else:
-                    load_chunk_data_fast(f, gName, field, idx, result[field], stored)
+                    if verbose:
+                        print(f"Warning: Field {field} not found in {gName}, skipping.")
+            fields = valid_fields
+        fileNum = 0
+        total_valid = 0
+        field_shapes = {}
+        field_dtypes = {}
+        cached_masks = {} 
+        chunk_stats = {}
+        file_handles = []
+        while True:
+            try:
+                f = h5py.File(snapPath(basePath, snapNum, fileNum), 'r') 
+                if gName not in f:
+                    fileNum += 1
+                    continue
 
-            stored += n_valid
+                if not field_shapes:
+                    if fields is None:
+                        fields = list(f[gName].keys())
+                    else:
+                        valid_fields = [field for field in fields if field in f[gName]]
+                        if len(valid_fields) < len(fields):
+                            missing = set(fields) - set(valid_fields)
+                            if verbose:
+                                print(f"Warning: Fields {missing} not found, skipping.")
+                        fields = valid_fields
+
+                    for field in fields:
+                        field_shapes[field] = f[gName][field].shape[1:]  
+                        field_dtypes[field] = f[gName][field].dtype
+                coords = f[gName]['Coordinates'][:]
+                if fix_boundary_condition == True: 
+                    coords = periodic_boundary_condition_fix_coordinates(pos, coords, BoxSize)   
+                mins = np.min(coords, axis=0)
+                maxs = np.max(coords, axis=0)
+                if geometry == "sphere":
+                    closest_point = np.clip(pos, mins, maxs)
+                    distance = np.linalg.norm(closest_point - pos)
+                    overlap = distance <= boxSize/2.
+                else:
+                    search_min = pos - boxSize/2.
+                    search_max = pos + boxSize/2.
+                    overlap_x = (mins[0] <= search_max[0]) and (maxs[0] >= search_min[0])
+                    overlap_y = (mins[1] <= search_max[1]) and (maxs[1] >= search_min[1])
+                    overlap_z = (mins[2] <= search_max[2]) and (maxs[2] >= search_min[2])
+
+                    overlap = overlap_x and overlap_y and overlap_z
+
+                if overlap == False:
+                    if verbose == True:
+                        print(f"  Skipping chunk {fileNum}, there are no particles inside volume.")
+                    fileNum+=1
+                    continue                   
+                n_total = len(coords)
+                valid = compute_mask(coords, pos, boxSize, geometry)
+                idx = np.where(valid)[0]
+                n_valid = len(idx)
+
+                if n_valid > 0:
+                    cached_masks[fileNum] = idx 
+                    total_valid += n_valid
+                    chunk_stats[fileNum] = (n_valid, n_total)
+                    if verbose:
+                        print(f"  Chunk {fileNum}: {n_valid} particles")
+
+                del valid, coords
+                file_handles.append(f)
+                fileNum += 1
+
+            except FileNotFoundError:
+                break
+
+        if verbose:
+            print(f"Total valid particles: {total_valid}")
+        result = {}
+        for field in fields:
+            shape = (total_valid,) + field_shapes[field]
+            result[field] = np.empty(shape, dtype=field_dtypes[field])
             if verbose:
-                print(f"  Chunk {fileNum} were saved. Process {stored}/{total_valid}")
+                print(f"Allocated {field}: {shape}, {result[field].nbytes / 1e9:.2f} GB")
+        if verbose:
+            print("\nSecond pass: loading data...")
+        stored = 0
+        for fileNum in sorted(cached_masks.keys()):
+            idx = cached_masks[fileNum]
+            n_valid, n_total = chunk_stats[fileNum]
 
-            del coords
-    del cached_masks
-    gc.collect()
-    if load_halos == False:
-        return result
-    else:
+            with h5py.File(snapPath(basePath, snapNum, fileNum), 'r') as f:
+                coords = f[gName]['Coordinates'][:]
+                if fix_boundary_condition:
+                    coords = periodic_boundary_condition_fix_coordinates(pos, coords, BoxSize)
+                for field in fields:
+                    if field == "Coordinates":
+                        extract_2d(coords, idx, result[field], stored)
+                    else:
+                        load_chunk_data_fast(f, gName, field, idx, result[field], stored)
+
+                stored += n_valid
+                if verbose:
+                    print(f"  Chunk {fileNum} were saved. Process {stored}/{total_valid}")
+
+                del coords
+        del cached_masks
+        gc.collect()
+        if load_halos == False:
+            return result
+    elif load_halos == True or load_only_halos == True:
         if halo_fields is not None:
             if type(halo_fields) is str:
                 halo_fields = [halo_fields]
@@ -415,5 +416,7 @@ def load_sub_volume(basePath, snapNum = None, partType='gas',
         idx = np.where(mask == True)[0]
         if verbose == True:
             print(f"  {len(idx)} halos were extracted from sub-volume!")
+        if load_only_halos == True:
+            return idx
         return result, idx
 

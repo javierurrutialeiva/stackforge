@@ -3,17 +3,21 @@ import numpy as np
 import illustris_python as il
 from astropy import constants as const
 from astropy import units as u
+from astropy import constants as consts
 from matplotlib.colors import LogNorm 
 from scipy.spatial import cKDTree
 import importlib
+import time 
+
 import emcee
+import corner
 
 from multiprocessing import Pool, Value, shared_memory, Manager, cpu_count
 import sys
 
 try:
     from astropy.cosmology import Planck18_arXiv_v2 as cosmo
-except ImportError:
+except:
     from astropy.cosmology import Planck18 as cosmo
     
 from tqdm import tqdm
@@ -157,19 +161,118 @@ class halo():
             gas_mass = np.trapz(density*R*2*np.pi, x = R)
             total_mass = gas_mass/fb 
         return gas_mass, total_mass
-    
+    def add_property(self, key, units, volume_weighted = False, 
+                     average = False, mass_weighted = False, 
+                     projected = False):
+        if hasattr(self, "properties") == False:
+            self.properties = {}
+        if type(key) == str:
+            property_dict = {}
+            property_dict["name"] = key 
+            property_dict["volume_weighted"] = volume_weighted
+            property_dict["average"] = average
+            property_dict["mass_weighted"] = mass_weighted
+            property_dict["projected"] = projected
+            uns = get_variables(units)
+            uns_dict = {unit:getattr(u,unit) for unit in uns}
+            property_units =  eval(units, {}, uns_dict)
+            property_dict["units"] = property_units
+            self.properties[key] = property_dict
+        elif isinstance(key, (np.ndarray, list, tuple)):
+            for i,k in enumerate(key):
+                units_i = units[i]
+                property_dict = {}
+                property_dict["name"] = k 
+                property_dict["volume_weighted"] = volume_weighted[i] if isinstance(volume_weighted, (np.ndarray, list, tuple)) else volume_weighted
+                property_dict["average"] = average[i] if isinstance(average, (np.ndarray, list, tuple)) else average
+                property_dict["mass_weighted"] = mass_weighted[i] if isinstance(mass_weighted, (np.ndarray, list, tuple)) else mass_weighted
+                property_dict["projected"] = projected[i] if isinstance(projected, (np.ndarray, list, tuple)) else projected
+                uns = get_variables(units_i)
+                uns_dict = {unit:getattr(u,unit) for unit in uns}
+                property_units =  eval(units_i, {}, uns_dict)
+                property_dict["units"] = property_units
+                self.properties[k] = property_dict
+        isinstance(key, (np.ndarray, list, tuple))
+    def add_definition(self, definition, volume_weighted = False, average = False, mass_weighted = False, projected = False):
+        if hasattr(self, "definitions") == False:
+            self.definitions = {}
+        if type(definition) is str:
+            expr_dict = parse_expression(definiton)
+            name = expr_dict["name"]
+            expr_dict["volume_weighted"] = volume_weighted
+            expr_dict["average"] = average
+            expr_dict["mass_weighted"] = mass_weighted
+            expr_dict["projected"] = projected
+            self.definitions[name] = expr_dict
+        if isinstance(definition, (np.ndarray, list, tuple)):
+            for d in definition:
+                expr_dict = parse_expression(definition)
+                name = expr_dict["name"]
+                expr_dict["volume_weighted"] = volume_weighted[i] if isinstance(volume_weighted, (np.ndarray, list, tuple)) else volume_weighted
+                expr_dict["average"] = average[i] if isinstance(average, (np.ndarray, list, tuple)) else average
+                expr_dict["mass_weighted"] = mass_weighted[i] if isinstance(mass_weighted, (np.ndarray, list, tuple)) else mass_weighted
+                expr_dict["projected"] = projected[i] if isinstance(projected, (np.ndarray, list, tuple)) else projected
+                self.definitions[name] = expr_dict                
+    def add_constant(self, const, value = None, units = None):
+        if hasattr(self, "constants") == False:
+            self.constants = {}
+        if type(const) is str:
+            if value is None:
+                c = getattr(consts, const)
+                c_dict = dict(
+                    const_name = const,
+                    value = c.value,
+                    units = c.unit
+                )
+                self.constants[const] = c_dict
+            else:
+                uns = get_variables(units)
+                uns_dict = {unit:getattr(u,unit) for unit in uns}
+                const_units =  eval(units, {}, uns_dict)
+                c_dict = dict(
+                    const_name = const,
+                    value = float(value),
+                    units = const_units
+                )
+                self.constants[const] = c_dict
+        elif isinstance(const, (np.ndarray, list, tuple)):
+            for i,c in enumerate(const):
+                if value is None:
+                    c_dict = dict(
+                        const_name = c,
+                        value = getattr(consts, c).value,
+                        units = getattr(consts, c).unit
+                    )
+                    
+                else:
+                    if value[i] is not None:
+                        uns = get_variables(units[i])
+                        uns_dict = {unit:getattr(u,unit) for unit in uns}
+                        const_units =  eval(units[i], {}, uns_dict)
+                        c_dict = dict(
+                            const_name = c,
+                            value = float(value[i]),
+                            units = const_units
+                        )
+                    elif value[i] is None:
+                        c_dict = dict(
+                            const_name = c,
+                            value = getattr(consts, c).value,
+                            units = getattr(consts, c).unit
+                        )  
+                self.constants[c] = c_dict
+                
     def generate_profiles(self, R, projection="3d", use_snap=False,
                           store=True, snap=None, comoving=False,
                           triax=False, dtype = np.float32,
                           chunk_size=int(1e7), use_multiprocessing = False,
-                          ncores = 4, expr = None, 
-                          funcs = None, defs = None,
-                          root = None,
+                          ncores = 4,
                           partType = "gas",
                           axis = ["x","y"],
                           sub = False,
-                          R_spacing = "linear"):
-        if expr is None:
+                          R_spacing = "linear", 
+                          expr_mode = False, root = "functions"):
+        if expr_mode == False:
             if use_multiprocessing == True:
                 n_cores_total = cpu_count()
                 print(f"Using {ncores} of {n_cores_total} available cores!")
@@ -178,7 +281,6 @@ class halo():
             n_bins = len(r_edges) - 1
             if n_bins <= 0:
                 raise ValueError("R must contain bin edges (len(R) >= 2).")
-
             if not use_snap:
                 gas = self.gas
             elif use_snap and snap is None:
@@ -475,73 +577,137 @@ class halo():
 
             else:
                 raise ValueError("projection must be '3d' or '2d'")
-        elif expr is not None and type(expr) is str:
+        elif expr_mode == True:
+            
             if root is not None:
                 root = importlib.import_module(root)
                                     
             R = np.asarray(R)
             r_edges = R
-            variables = get_variables(expr)
-            if funcs is not None:
-                funcs_dict = {}
-                for f in funcs:
-                    funcs_dict[f.__name__] = f
-            if defs is not None:
-                defs_dict = get_def(defs)
-                if len(defs_dict.keys()) > 1:
-                    fields = np.unique(np.concatenate([defs_dict[k]["args"] for k in defs_dict.keys()]))
-                else:
-                    fields = defs_dict[list(defs_dict.keys())[0]]["args"]
-            else:
-                defs_dict = {v : None for v in variables}
-                fields = variables
+            properties = self.properties
+            contants = self.constants if hasattr(self, "constants") else {}
+            definitions = self.definitions if hasattr(self, "definitions") else {}
+            functions = [d["func"] for d in definitions.values()]
+            property_names = np.unique(list(self.properties.keys()))
+            fields = property_names
+            constants_dict = {}
+            if len(constants.keys()) > 0:
+                for k in constants.keys():
+                    constants_dict[name] = constants[k]["value"]*constants[k]["units"]
+            ax1, ax2 = axis
+            i1 = {'x': 0, 'y': 1, 'z': 2}[ax1]
+            i2 = {'x': 0, 'y': 1, 'z': 2}[ax2]
+            
             if 'Coordinates' not in fields:
-                fields = np.append(fields, 'Coordinates')
+                fields = np.append(fields, 'Coordinates')            
+            if len(functions) > 0:
+                funcs_dict = {}
+                for f in functions:
+                    if callable(f):
+                        funcs_dict[f.__name__] = f
+                    elif type(f) is str:
+                        funcs_dict[f] = getattr(root, f)
             if not use_snap:
                 snap = self.gas
             elif use_snap and snap is None:
                 snap = il.snapshot.loadSubset(basePath, snapNum, partType,
                                              fields=fields)
-            if projection == "3d":
-                vol_shells = (4.0 / 3.0) * np.pi * (r_edges[1:]**3 - r_edges[:-1]**3) 
-                
-                coords = snap['Coordinates']
-                R_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
-                radial_profiles = dict()
-                N = coords.shape[0]
-                if N == 0:
-                    raise ValueError("No particles found in snapshot.")
-                coords = coords.astype(dtype, copy=False)
-                pos = np.asarray(self.Pos, dtype=dtype)
-                inds = compute_radial_bin_indices(r_edges, pos, coords, chunk_size)
-                n_bins = len(r_edges) - 1
-                properties = {}
-                idx = 0
-                for f in fields:
-                    if f not in ["Coordinates", "N", "V"]:
-                        counts = np.zeros(len(r_edges) - 1, dtype = np.int32)
-                        output = np.zeros(len(r_edges) - 1, dtype = np.float64)
-                        attach_numba(snap[f], inds, output, counts, n_bins)
-                        properties[f] = output
-                if defs is not None:
-                    output_dict = {}
-                    for var in defs_dict.keys():
-                        args = defs_dict[var]["args"]
-                        func = defs_dict[var]["func"]
-                        p = [properties[a] for a in args if a != 'Coordinates']
-                        if root is not None:
-                            output_dict[var] = getattr(root, func)(*p)
+           
+            vol_shells = (4.0 / 3.0) * np.pi * (r_edges[1:]**3 - r_edges[:-1]**3) 
+            area_rings = 2 * np.pi * (r_edges[1:]**2 - r_edges[:-1]**2) 
+            R_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
+            coords = snap['Coordinates']  
+            radial_profiles = dict()
+            N = coords.shape[0]
+            if N == 0:
+                raise ValueError("No particles found in snapshot.")
+            coords3d = coords.astype(dtype, copy=False)
+            coords2d = np.column_stack([coords3d[:,i1], coords3d[:,i2]])
+            pos = self.Pos
+            pos2d = np.asarray([pos[i1], pos[i2]])
+            N = np.shape(coords3d)[0]
+            start = 0 
+            stop = chunk_size
+            results = {p:np.zeros(len(r_edges)-1) for p in property_names}
+            counts = np.zeros(len(r_edges) - 1)
+            mass_profile = np.zeros(len(r_edges) - 1)
+            mass_profile2d = np.zeros(len(r_edges) - 1)
+            while start < N:
+                rchunk = compute_offsets(coords3d[start:stop], pos)
+                rchunk2d = compute_offsets_2d(coords3d[start:stop], pos)
+                if R_spacing == "linear":
+                    inds = compute_bin_indices_linear(rchunk, r_edges.min(), r_edges.max(), len(r_edges))
+                    inds2d = compute_bin_indices_linear(rchunk2d, r_edges.min(), r_edges.max(), len(r_edges))
+                elif R_spacing == "log":
+                    inds = compute_bin_indices_log(rchunk, r_edges.min(), r_edges.max(), len(r_edges))
+                    inds2d = compute_bin_indices_log(rchunk2d, r_edges.min(), r_edges.max(), len(r_edges))
+                    
+                attach_numba(snap["Masses"]*1e10, inds, mass_profile, len(r_edges) - 1)
+                attach_numba(snap["Masses"]*1e10, inds2d, mass_profile2d, len(r_edges) - 1)
+                for i,field in enumerate(property_names): 
+                    if i == 0:
+                        count_numba(snap[field], inds, counts, len(r_edges) - 1) 
+                    prop = properties[field]
+                    if prop["mass_weighted"] == True:
+                        if prop["projected"] == False:
+                            attach_numba(snap[field], inds, results[field], len(r_edges) - 1, snap["Masses"])
+                        else: 
+                            attach_numba(snap[field], inds2d, results[field], len(r_edges) - 1, snap["Masses"])
+                    else:
+                        if prop["projected"] == False:
+                            attach_numba(snap[field], inds, results[field], len(r_edges) - 1)
                         else:
-                            output_dict[var] = funcs_dict[func](*p)
-                else:
-                    output_dict = properties
-                for k in properties.keys():
-                    if k in variables:
-                        output_dict[k] = properties[k]
-                output_dict["V"] = vol_shells
-                output_dict["N"] = counts
-                result = eval(expr, {}, output_dict)
-                return result
+                            attach_numba(snap[field], inds2d, results[field], len(r_edges) - 1)                       
+                start+=chunk_size
+                stop+=chunk_size            
+            for i, field in enumerate(property_names):
+                prop = properties[field]
+                if prop["volume_weighted"] == True:
+                    if prop["projected"] == False:
+                        results[field] = results[field]/vol_shells
+                    else:
+                        results[field] = results[field]/area_rings
+                if prop["average"] == True:
+                    results[field] = results[field]/counts
+                if prop["mass_weighted"] == True:
+                    if prop["projected"] == False:
+                        results[field] = results[field]/mass_profile
+                    else:
+                        results[field] = results[field]/mass_profile2d
+            
+            if len(definitions.keys()) > 0:
+                for k in definitions.keys():
+                    di = definition[k]
+                    if di['type'] == 'function':
+                        func = funcs_dict[di['function']]
+                        args = [results[arg_i] for arg_i in funcs_dict['args']]
+                        res = func(*args)
+                        results[k] = res
+                    elif di['type'] == 'operation':
+                        opr = di['operation']
+                        var = results | constants_dict
+                        res = eval(opr, {}, var)
+                        results[k] = res
+            return results
+            if defs is not None:
+                output_dict = {}
+                for var in defs_dict.keys():
+                    args = defs_dict[var]["args"]
+                    func = defs_dict[var]["func"]
+                    p = [properties[a] for a in args if a != 'Coordinates']
+                    if root is not None:
+                        output_dict[var] = getattr(root, func)(*p)
+                    else:
+                        output_dict[var] = funcs_dict[func](*p)
+            else:
+                output_dict = properties
+            for k in properties.keys():
+                if k in variables:
+                    output_dict[k] = properties[k]
+            output_dict["V"] = vol_shells
+            output_dict["N"] = counts
+            result = eval(expr, {}, output_dict)
+            return result
 class stack():
     def __init__(self, sim = "TNG", Mlogmin = None, Mlogmax = None, redshift = None, **kwargs):
         if sim == "TNG" or sim == "illustris":
@@ -606,12 +772,14 @@ class stack():
             self.halos = halos
          
     @classmethod
-    def load_halos(cls, profiles1h, profiles2h, masses, **kwargs):
+    def load_halos(cls, profiles1h, profiles2h = None, masses = None, **kwargs):
         n_halos = len(profiles1h)
-
-        if len(profiles2h) != n_halos or len(masses) != n_halos:
-            raise ValueError("profiles1h, profiles2h and masses must have the same length")
-
+        if profiles2h is not None:
+            if len(profiles2h) != n_halos:
+                raise ValueError("profiles1h and profiles2h must have the same length")
+        if masses is not None:
+            if len(masses) != n_halos:
+                raise ValueError("masses and profiles2h must have the same length")
         for key, values in kwargs.items():
             if len(values) != n_halos:
                 raise ValueError(f"Parameter '{key}' must have the same length as profiles1h")
@@ -619,8 +787,10 @@ class stack():
         for i in range(n_halos):
             halo_i = halo(sim = "empty")
             halo_i.profiles1h = profiles1h[i]
-            halo_i.profiles2h = profiles2h[i]
-            halo_i.Mass = masses[i]
+            if profiles2h is not None:
+                halo_i.profiles2h = profiles2h[i]
+            if masses is not None:
+                halo_i.Mass = masses[i]
             halo_i.group = {}
             for key, values in kwargs.items():
                 halo_i.group[key] = values[i]
@@ -642,9 +812,10 @@ class stack():
         output+= f"\nN halos = {len(Mass)}"
         output+= f"\nMass [{np.log10(Mmin*1e10/self.h)},{np.log10(Mmax*1e10/self.h)}]"
         return output
-    def compute_1h2hprofiles(self, R, projection = "3d", triax = False, 
+    def compute_profiles(self, R, projection = "3d", triax = False, 
                              snap = None, mean_subtracted = False,
-                             progressBar = True, comoving = False):              
+                             progressBar = True, comoving = False, 
+                             two_halo_term = True):              
         if snap is None and hasattr(self, "snap"):
             snap = self.snap
         elif snap is None and hasattr(self,"snap") == False:
@@ -655,22 +826,16 @@ class stack():
         it = range(len(self.halos))
         if progressBar:
             pbar = tqdm(total = len(self.halos), desc="Processing halos")
+           
         for i in it:
             h = self.halos[i]
-            h.separate_into_1h2h(R, projection, triax = triax, snap = snap, 
-                                 comoving = comoving)
+            if two_halo_term == True:
+                h.separate_into_1h2h(R, projection, triax = triax, snap = snap, 
+                                     comoving = comoving)
+            else:
+                h.generate_profiles(R, projection, triax = triax, comoving = comoving)
             if progressBar == True:
                 pbar.update(1)
-    def stack_profiles(self, prop = "ne"):
-        if prop == "ne":
-            p1h = np.array([h.ne1h for h in self.halos])
-            p2h = np.array([h.ne2h for h in self.halos])
-            ptotal = p1h + p2h
-            stacked_p_total = np.mean(ptotal, axis = 0)
-            stacked_1h = np.mean(p1h, axis = 0)
-            stacked_2h = stacked_p_total - stacked_1h
-            self.stacked_ne1h = stacked_1h
-            self.stacked_ne2h = stacked_2h
     @classmethod
     def selection(cls, sim = "TNG", Mmin = 10, Mmax = 15, **kwargs): 
         if sim == "TNG" or sim == "illustris":
@@ -718,67 +883,60 @@ class stack():
             keys = list(self.halos[0].group.keys())
             for k in keys:
                 f.create_dataset(k, data = np.array([h.group[k] for h in self.halos]))
-    def bootstrapping(self, nsamples=1000):
-        profiles1h = np.array([h.profiles1h for h in self.halos])  
-        profiles2h = np.array([h.profiles2h for h in self.halos]) 
-        Nhalos = profiles1h.shape[0]
-        if profiles1h.ndim == 3 and profiles2h.ndim == 3:
+    def bootstrapping(self, nsamples=1000, one_halo = True, two_halo = False, total = False):
+        output = []
+        if one_halo == True:
+            profiles1h = np.array([h.profiles1h for h in self.halos]) 
+            if profiles1h.ndim == 3:
+                boot1h = Nhalos = profiles1h.shape[0]
+                for i in range(nsamples):
+                    resample_idx = np.random.randint(0, Nhalos, Nhalos)
+                    boot1h[i] = np.mean(profiles1h[resample_idx], axis=0)                
+                mu1h = np.mean(boot1h, axis = 0)
+                boot1h_flat = boot1h.reshape(nsamples, -1)
+                cov1h = np.cov(boot1h_flat, rowvar = False)
+                output.append(cov1h)
+        if two_halo == True:
+            profiles2h = np.array([h.profiles2h for h in self.halos]) 
+            Nhalos = profiles2h.shape[0]
+            if profiles2h.ndim == 3:
+                
+                boot2h = np.zeros((nsamples, profiles2h.shape[1], profiles2h.shape[2]))
 
-            boot1h = np.zeros((nsamples, profiles1h.shape[1], profiles1h.shape[2]))
-            boot2h = np.zeros((nsamples, profiles2h.shape[1], profiles2h.shape[2]))
+                for i in range(nsamples):
+                    resample_idx = np.random.randint(0, Nhalos, Nhalos)
+                    boot2h[i] = np.mean(profiles2h[resample_idx], axis=0)
 
-            for i in range(nsamples):
-                resample_idx = np.random.randint(0, Nhalos, Nhalos)
-                boot1h[i] = np.mean(profiles1h[resample_idx], axis=0)
-                boot2h[i] = np.mean(profiles2h[resample_idx], axis=0)
+                mu2h = np.mean(boot2h, axis=0)
 
-            mu1h = np.mean(boot1h, axis=0)
-            mu2h = np.mean(boot2h, axis=0)
+                boot2h_flat = boot2h.reshape(nsamples, -1)
 
-            boot1h_flat = boot1h.reshape(nsamples, -1)
-            boot2h_flat = boot2h.reshape(nsamples, -1)
+                cov2h = np.cov(boot2h_flat, rowvar=False)
+                output.append(cov2h)
+        if total == True:
+            profiles1h = np.array([h.profiles1h for h in self.halos]) 
+            profiles2h = np.array([h.profiles2h for h in self.halos]) 
+            profilesT = profiles1h + profiles2h
+            Nhalos = profilesT.shape[0]
+            if profiles2h.ndim == 3:
+                
+                bootT = np.zeros((nsamples, profilesT.shape[1], profilesT.shape[2]))
 
-            cov1h = np.cov(boot1h_flat, rowvar=False)
-            cov2h = np.cov(boot2h_flat, rowvar=False)
+                for i in range(nsamples):
+                    resample_idx = np.random.randint(0, Nhalos, Nhalos)
+                    bootT[i] = np.mean(profilesT[resample_idx], axis=0)
 
-            mu1h_flat = mu1h.flatten()
-            mu2h_flat = mu2h.flatten()
-            cov12 = ((boot1h_flat - mu1h_flat).T @ (boot2h_flat - mu2h_flat)) / (nsamples - 1)
+                muT = np.mean(bootT, axis=0)
 
-        elif profiles1h.ndim == 2 and profiles2h.ndim == 2:
-            boot1h = np.zeros((nsamples, profiles1h.shape[1]))
-            boot2h = np.zeros((nsamples, profiles2h.shape[1]))
+                bootT_flat = bootT.reshape(nsamples, -1)
 
-            for i in range(nsamples):
-                resample_idx = np.random.randint(0, Nhalos, Nhalos)
-                boot1h[i] = np.mean(profiles1h[resample_idx], axis=0)
-                boot2h[i] = np.mean(profiles2h[resample_idx], axis=0)
-
-            mu1h = np.mean(boot1h, axis=0)
-            mu2h = np.mean(boot2h, axis=0)
-
-            cov1h = np.cov(boot1h, rowvar=False)
-            cov2h = np.cov(boot2h, rowvar=False)
-
-            cov12 = ((boot1h - mu1h).T @ (boot2h - mu2h)) / (nsamples - 1)
-
-        else:
-            raise ValueError(f"Unexpected profile dimensions: profiles1h.ndim={profiles1h.ndim}, profiles2h.ndim={profiles2h.ndim}")
-
-        covT = cov1h + cov2h + 2*cov12 
-
-        self.cov1h = cov1h 
-        self.cov2h = cov2h
-        self.covT = covT
-        self.cov12 = cov12
-
-        return cov1h, cov2h, covT, cov12
+                covT = np.cov(bootT_flat, rowvar=False)
+                output.append(covT)
+        return output
         
 class sampler():
     def __init__(self, x, y, cov = None, root = 'functions'):
         cov = np.eye(len(x)) if cov is None else cov
-        if np.ndim(cov) == 1:
-            cov = np.diag(cov)
         self.x = x
         self.y = y
         self.cov = cov
@@ -809,13 +967,28 @@ class sampler():
         self.prior_behaviors = prior_behaviors
         self.fixed_params = fixed_params
         self.free_params = free_params
+        self.labels = labels
     def __repr__(self):
         return self.__dict__
     def __str__(self):
         return self.__dict__
+    def save(self, folder = None):
+        folder = folder if folder is not None else "./"
+        if folder != "./" and folder is not None:
+            if os.path.exists(folder) == False:
+                os.mkdir(folder)
+        x = self.x
+        y = self.y
+        cov = self.cov
+        
+        self.folder = folder
+        
+        np.savetxt(f"{folder}/x.txt", x)
+        np.savetxt(f"{folder}/y.txt", y)
+        np.savetxt(f"{folder}/cov.txt",cov)
     def run(self, model, nwalkers, nsteps, blobs = True, overwrite = False, 
             output_file = "samples.h5", ncores = 1, likelihood = "gaussian",
-            initial_guess = None):
+            initial_guess = None, use_numba = False, demo = False, folder = None):
         root = self.root
         funcs = importlib.import_module(root)
         if hasattr(self, "prior_funcs") == False:
@@ -823,45 +996,105 @@ class sampler():
         x = self.x
         y = self.y
         cov = self.cov
-        
+        folder = self.folder if hasattr(self, "folder") else folder
+        folder = folder + "/" if folder[-1] != "/" else folder
+        if folder is not None:
+            self.folder = folder
+            if os.path.exists(folder) == False and folder != "./":
+                os.mkdir(folder)
+            output_file = folder + output_file
         if overwrite == True:
             if os.path.exists(output_file):
                 os.remove(output_file)
         backend = emcee.backends.HDFBackend(output_file)
         
         self.filename = output_file
-        
-        model = getattr(funcs, model)
+        if type(model) == str:
+            model = getattr(funcs, model) 
         prior_funcs = self.prior_funcs
         prior_args = self.prior_args
         prior_behaviors = self.prior_behaviors
         fixed_params = self.fixed_params
         free_params = self.free_params
         global ln_prior
-        def ln_prior(theta, prior_behaviors, prior_funcs, prior_args):
-            prior = 0.0
-            i_theta = 0
-            for i in range(len(prior_behaviors)):
-                if prior_behaviors[i] == 'free':
-                    args = prior_args[i_theta]
-                    func = prior_funcs[i_theta]
-                    value = getattr(funcs, func)(theta[i_theta], *args)
-                    prior+=value
-                    i_theta+=1
-            return prior
+        if use_numba == False:
+            def ln_prior(theta, prior_behaviors, prior_funcs, prior_args):
+                prior = 0.0
+                i_theta = 0
+                for i in range(len(prior_behaviors)):
+                    if prior_behaviors[i] == 'free':
+                        args = prior_args[i_theta]
+                        func = prior_funcs[i_theta]
+                        value = func(theta[i_theta], *args)
+                        prior+=value
+                        i_theta+=1
+                return prior
+        else:
+            def ln_prior(theta, prior_behaviors, prior_funcs, prior_args):
+                prior = 0.0
+                i_theta = 0 
+                for i in range(len(prior_behaviors)):
+                    if prior_behaviors[i] == 'free':
+                        args = prior_args[i_theta]
+                        func = prior_funcs[i_theta]
+                        value = func(theta[i_theta], *args)
+                        prior+=value
+                        i_theta+=1
+                return prior                
         global ln_likelihood
-        def ln_likelihood(theta, x, y, sigma, **kwargs):
-            mu = model(x, theta)
-            likelihood = kwargs["likelihood"]
-            res = (y - mu)
-            inv_cov = kwargs["inv_cov_matrix"]
-            log_det_C = kwargs["log_det_C"]
-            chi2 = np.dot(res.T, np.dot(cov, res))
-            if likelihood == 'chi2':
-                ln_lk = -0.5 * chi2
-            elif likelihood == 'gaussian':
-                ln_lk = -0.5 * (chi2 + log_det_C + len(y) * np.log(2 * np.pi))
-            return ln_lk, chi2, mu
+        if use_numba == False:         
+            def ln_likelihood(theta, x, y, sigma, **kwargs):
+                model = kwargs["model"]
+                mu = model(x, theta)
+                likelihood = kwargs["likelihood"]
+                log_det_C = kwargs.get("log_det_C", 0)
+                res = (y - mu)
+
+                if np.ndim(sigma) > 1:
+                    inv_cov = kwargs["inv_cov_matrix"]
+                    chi2 = np.dot(res.T, np.dot(inv_cov, res))
+                else:
+                    log_det_C = np.sum(np.log(sigma**2))
+                    chi2 = np.sum(res**2/sigma**2)
+                if likelihood == 'chi2':
+                    ln_lk = -0.5 * chi2
+                elif likelihood == 'gaussian':
+                    ln_lk = -0.5 * (chi2 + log_det_C + len(y) * np.log(2 * np.pi))
+                return ln_lk, chi2, mu
+        else:
+            def ln_likelihood(theta, x, y, sigma, model, likelihood, log_det_C, inv_cov_matrix):
+                x = np.asarray(x)
+                y = np.asarray(y)
+                sigma = np.asarray(sigma)
+                if demo == True:
+                    print("  Computing model")
+                    t1 = time.time()
+                mu = model(x, theta)
+                if demo == True:
+                    t2 = time.time()
+                    print(f"  Took {t2 - t1} seconds to compute the model")
+                res = y - mu
+                if demo == True:
+                    print("  Computing chi2")
+                    t1 = time.time()
+                if sigma.ndim > 1: 
+                    chi2 = 0 
+                    for i in range(len(res)):
+                        for j in range(len(res)):
+                            chi2+=res[i]*res[j]*inv_cov_matrix[i,j]
+                elif sigma.ndim == 1 or inv_cov_matrix is None:
+                    log_det_C = np.sum(np.log(sigma**2))
+                    chi2 = np.sum(res**2 / sigma**2)
+                if demo == True:
+                    t2 = time.time()
+                    print(f"  chi2 has computed in {t1 - t2} seconds")
+                if likelihood == 'chi2':
+                    ln_lk = -0.5 * chi2
+                elif likelihood == 'gaussian':
+                    ln_lk = -0.5 * (chi2 + log_det_C + len(y) * np.log(2 * np.pi))
+                else:
+                    ln_lk = 0.0
+                return ln_lk, chi2, mu
         global ln_posterior
         def ln_posterior(theta, x, y, sigma, **kwargs):
             ln_likelihood_func = kwargs["ln_likelihood"]
@@ -874,6 +1107,9 @@ class sampler():
             prior_args = kwargs['prior_args']
             
             blobs = kwargs['blobs']
+            if demo == True:
+                print("Merging fixed and free parameters")
+                t1 = time.time()
             if len(fixed_params) > 0:
                 free_params_indx = free_params
                 fixed_params_indx = [p[0] for p in fixed_params]
@@ -882,18 +1118,39 @@ class sampler():
                 new_theta[fixed_params_indx] = fixed_params_values
                 new_theta[free_params_indx] = theta
                 theta = new_theta
-            
+            if demo == True:
+                t2 = time.time()
+                print(f"Took {t2 - t1} seconds to merge parameters")
+            if demo == True:
+                print("Computing prior")
+                t1 = time.time()
             ln_p = ln_prior(theta, prior_behaviors, prior_funcs, prior_args)
+            if demo == True:
+                t2 = time.time()
+                print(f"Priors has computed in {t2 - t1} seconds")
             if np.isnan(ln_p) or np.isfinite(ln_p) == False:
                 ln_p = -np.inf
             if not np.isfinite(ln_p):
                 if blobs:
                     return -np.inf, np.nan, np.full_like(y, np.nan)
                 return -np.inf
-            ln_lk, chi2, mu = ln_likelihood(theta, x, y, sigma, **kwargs)
-            if chi2 < 0:
-                print(theta)
-                print(mu)
+            if demo == True:
+                print("Computing likelihood")
+                t1 = time.time()
+            if use_numba == False:
+                ln_lk, chi2, mu = ln_likelihood(theta, x, y, sigma, **kwargs) 
+            elif use_numba == True:
+                likelihood = kwargs["likelihood"]
+                model = kwargs["model"]
+                log_det_C = kwargs.get("log_det_C", 0)
+                inv_cov_matrix = kwargs.get("inv_cov_matrix", 0)
+                ln_lk, chi2, mu = ln_likelihood(theta, x, y, sigma, model, likelihood, log_det_C, inv_cov_matrix)
+            if demo == True:
+                t2 = time.time()
+                print(f"Likelihood has computed in {t2 - t1} seconds")
+            if chi2<0:
+                ln_lk = -np.inf
+                chi2 = np.inf
             if np.isnan(ln_lk) or np.isfinite(ln_lk) == False:
                 ln_lk = -np.inf
             ln_pos = ln_lk + ln_p
@@ -906,13 +1163,10 @@ class sampler():
         if blobs == True:
             dtype = []
             dtype.append(("chi2", np.dtype((np.float64, 1))))
-            dtype.append(("signal", np.dtype((np.float64, len(x)))))
+            dtype.append(("signal", np.dtype((np.float64, len(y)))))
         else:
             dtype = None
-            
-        log_det_C = np.linalg.slogdet(cov)[1]
-        inv_cov_matrix = np.linalg.inv(cov)        
-
+        prior_funcs = [getattr(funcs, f) for f in prior_funcs] if use_numba == False else [getattr(funcs, f + "_numba") for f in prior_funcs]
         sampler_kwargs = dict(
             model = model,
             ln_prior = ln_prior,
@@ -924,10 +1178,12 @@ class sampler():
             prior_args = prior_args,
             blobs = blobs,
             likelihood = likelihood,
-            inv_cov_matrix = inv_cov_matrix,
-            log_det_C = log_det_C
             )
-        
+        if np.ndim(cov) > 1:
+            log_det_C = np.linalg.slogdet(cov)[1]
+            inv_cov_matrix = np.linalg.inv(cov)        
+            sampler_kwargs["inv_cov_matrix"] = inv_cov_matrix
+            sampler_kwargs["log_det_C"] = log_det_C
         ndims = len(free_params)
         param_limits = [args[-2::] for args in prior_args]
         if initial_guess is None:
@@ -935,7 +1191,7 @@ class sampler():
             for i in range(len(param_limits)):
                 initial_guess[:,i] = np.array(
                     random_initial_steps(param_limits[i], nwalkers, 
-                    distribution = getattr(funcs,prior_funcs[i]),
+                    distribution = prior_funcs[i],
                     dist_args = prior_args[i],
                     nsamples = 1e3)
                     )
@@ -964,17 +1220,123 @@ class sampler():
             backend=backend,
             blobs_dtype = dtype
         ) 
-        EnsembleSampler.run_mcmc(initial_guess, nsteps, progress=True, store = True) 
-    def load_chain(self, filename = None, load_blobs = True):
+        if demo == True:
+            pars = initial_guess[0]
+            t1 = time.time()
+            ln_posterior(pars, x, y, cov, **sampler_kwargs)
+            t2 = time.time()
+            print(f"Total time = {t2 - t1} seconds.")
+        elif demo == False:
+            EnsembleSampler.run_mcmc(initial_guess, nsteps, progress=True, store = True) 
+    @classmethod
+    def load(cls, folder):
+        folder = folder + "/" if folder[-1] != "/" else folder
+        x = np.loadtxt(folder + "x.txt")
+        y = np.loadtxt(folder + "y.txt")
+        cov = np.loadtxt(folder + "cov.txt")
+        files = os.listdir(folder)
+        out = cls(x, y, cov)
+        out.folder = folder
+        for f in files:
+            if "samples" in f:
+                try:
+                    chain, blobs = out.load_chain(folder + f, load_blobs = True)
+                    out.filename = folder + f
+                    return out, chain, blobs
+                except:
+                    chain = out.load_chain(folder + f, load_blobs = False)
+                    out.filename = folder + f
+                    return out, chain
+        return out
+    def load_chain(self, filename = None, load_blobs = True, discard = 0, thin = 1):
         filename = self.filename if hasattr(self, "filename") else filename
         backend = emcee.backends.HDFBackend(filename, read_only = True)
-        chain = backend.get_chain(flat = True)
+        chain = backend.get_chain(flat = True, discard = discard, thin = thin)
         if load_blobs == False:
             return chain
         else:
-            blobs = backend.get_blobs()
+            blobs = backend.get_blobs(discard = discard, thin = thin)
             return chain, blobs
+    def plot_corner(self, filename = None, sigma_ratio = None, fig = None, smooth = None, 
+                    plot_priors = True, discard = 0, thin = 1, **kwargs):
+        root = self.root
+        funcs = importlib.import_module(root)
         
+        labels = self.labels
+        ndims = len(labels)
+        figsize = kwargs.get("figsize", (5*len(labels), 5*len(labels)))
+        fig = plt.figure(figsize = figsize) if fig is None else fig
+        chain, blobs = self.load_chain(filename = filename, discard = discard, thin = thin)
+        labels = [text2latex(l) for l in labels]
+        quantiles = kwargs.get("quantiles", [0.16, 0.5, 0.84])
+        levels = kwargs.get("levels", (1-np.exp(-0.5), 1-np.exp(-2)))
+        truths = np.median(chain, axis = 0)
+        truths_color = kwargs.get("truths_color", "black")
+        bins = kwargs.get("bins", 30)
+        corner_color = kwargs.get("corner_color", "darkblue")
+        fill_contour_kwargs = {'colors': [f'dark{corner_color}', f'light{corner_color}'], 'alpha': 0.1}
+        title_fontsize = kwargs.get("title_fontsize", 20)
+        title_kwargs = {"fontsize":title_fontsize}
+        bins_linewidth = kwargs.get("bins_linewidth", 4)
+        bins_kwargs = {"bins":bins, "lw": bins_linewidth}
+        corner_plot = corner.corner(
+            chain,
+            fig = fig,
+            labels = labels,
+            quantiles = quantiles,
+            show_titles = True,
+            levels = levels,
+            truths = truths,
+            truth_color = truths_color,
+            plot_density = True,
+            no_fill_contours = True,
+            plot_datapoints = False,
+            bins = bins,
+            smooth = smooth,
+            smooth1d = smooth,
+            fill_contours = True,
+            hist_bin_factor= 5,
+            n_max_ticks = 5,
+            color = corner_color,
+            title_kwargs = title_kwargs,
+            fill_contour_kwargs = fill_contour_kwargs,
+            bins_kwargs = bins_kwargs
+        )
+        axes = fig.get_axes()
+        axes = np.array(axes).reshape((ndims, ndims))
+        if sigma_ratio is not None:
+            for i in range(ndims):
+                for j in range(ndims):
+                    pminx, pmedianx, pmaxx = calculate_sigma_intervals(chain[:,j], sigma = sigma_ratio)
+                    pminy, pmediany, pmaxy = calculate_sigma_intervals(chain[:,i], sigma = sigma_ratio)
+                    if i != j:
+                        axes[i][j].set_ylim((pmediany - pminy, pmediany + pmaxy))
+                        axes[i][j].set_xlim((pmedianx - pminx, pmedianx + pmaxx))
+                    elif i == j:
+                        axes[i][j].set_xlim((pmedianx - pminx, pmedianx + pmaxx))
+        if plot_priors == True:
+            prior_funcs = self.prior_funcs
+            prior_args = self.prior_args
+            prior_behaviors = self.prior_behaviors
+            prior_color = kwargs.get("prior_color", "darkgreen")
+            prior_alpha = kwargs.get("prior_alpha", 0.1)
+            for i in range(ndims):
+                for j in range(i + 1):
+                    if i == j:
+                        prior, pargs = prior_funcs[i], prior_args[i]
+                        if prior is None or pargs is None:
+                            continue
+                        else:
+                            if "uniform" in str(prior) or "flat" in str(prior):
+                                continue
+                            line = axes[i][j].lines[0]
+                            xdata,ydata = np.array(line.get_xdata()), np.array(line.get_ydata())
+                            xnew = np.linspace(xdata.min(), xdata.max(), 1000)
+                            p = np.exp(np.array([getattr(funcs,prior)(xnew_i, *pargs) for xnew_i in xnew]))
+                            p = p / p.max() * ydata.max()
+                            axes[i][j].fill_between(xnew, p, color = prior_color, lw = 3, alpha = prior_alpha, edgecolor = "black")
+
+        return fig
 def _worker2d(r_edges, pos, coords, Masses, e_abundance, u_part, chunk_size, factor, counter = None, total = 1,
              i1 = 0, i2 = 1, ntree = 5, min_size = 2e4, use_tree = False, R_spacing = "linear"):
 
@@ -1092,14 +1454,15 @@ def _worker(r_edges, pos ,coords, Masses, e_abundance, u_part, chunk_size, facto
 
 def process_subvolume(args):  
     i, j, k, pos, basePath, snapNum, R_subvolume, sub_volume_size, redshift, sim, R, fix_boundary_condition, geometry = args
-    
+
     while True:
-        subvolume, halos =  load_sub_volume(basePath, snapNum, 'gas', pos = pos, 
-                                boxSize = R_subvolume, load_halos = True, redshift = redshift, 
-                                verbose = False, 
-                                fields = ['Coordinates','Masses','ElectronAbundance', 'InternalEnergy'], 
-                                rmax = sub_volume_size, geometry = geometry, 
-                                fix_boundary_condition = fix_boundary_condition)
+        subvolume, halos = load_sub_volume(basePath, snapNum, 'gas', pos = pos, 
+                            boxSize = R_subvolume, load_halos = True, redshift = redshift, 
+                            verbose = False, 
+                            fields = ['Coordinates','Masses','ElectronAbundance', 'InternalEnergy'], 
+                            rmax = sub_volume_size, geometry = geometry, 
+                            fix_boundary_condition = fix_boundary_condition, 
+                            load_only_halos = load_only_halos)
         s = stack(sim = "TNG", basePath = basePath, haloIDs = halos, redshift=redshift, snap = subvolume)
         s.compute_1h2hprofiles(R, comoving = True, progressBar = False)
 
@@ -1117,9 +1480,9 @@ def process_subvolume(args):
         del subvolume, halos, s
         gc.collect()
         return (i, j, k, profiles1h_ijk, profiles2h_ijk, masses,
-               m200c, m500c, MTopHat, R200c, R500c, RTopHat)
+               m200c, m500c, MTopHat, R200c, R500c, RTopHat)           
 def process_subarea(args):
-    i, j, k, basePath, snapNum, R_subvolume, sub_volume_size, redshift, sim, R, fix_boundary_condition, geometry, axis = args
+    i, j, k, basePath, snapNum, R_subvolume, sub_volume_size, redshift, sim, R, fix_boundary_condition, geometry, two_halo_term, axis = args
     subarea, halos = load_sub_area(basePath, snapNum, 'gas', pos = pos, boxSize = R_subvolume, load_halos = True,
                                   redshift = redshift, fields = ['Coordinates','Masses','ElectronAbundance', 'InternalEnergy'],
                                   rmax = sub_volume_size, geometry = geometry, fix_boundary_condition = fix_boundary_condition,
@@ -1145,11 +1508,12 @@ def process_subarea(args):
 
 def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, redshift = None,
                      n_subvolumes = 100, parallel = False, ncores = 1, nmax = None, fix_boundary_condition = False,
-                     geometry = "sphere", projection = "3d", axis = ["x","y"]):
+                     geometry = "sphere", projection = "3d", axis = ["x","y"], two_halo_term = True):
     if redshift is not None:
         d = load_redshifts(basePath) 
         closest_redshift = np.argmin(np.abs(np.array(list(d.values())) - redshift))
         snapNum = int(list(d.keys())[closest_redshift])  
+    
     header = il.groupcat.loadHeader(basePath, snapNum)
     boxSize = header["BoxSize"]
     
@@ -1171,7 +1535,7 @@ def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, red
     rs200c = np.empty((n_subvolumes, n_subvolumes, n_subvolumes), dtype=object) 
     rs500c = np.empty((n_subvolumes, n_subvolumes, n_subvolumes), dtype=object) 
     rstophat = np.empty((n_subvolumes, n_subvolumes, n_subvolumes), dtype=object) 
-
+    
     tasks = []
     for i in range(n_subvolumes):
         for j in range(n_subvolumes):
@@ -1190,6 +1554,7 @@ def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, red
     if nmax is not None and nmax < len(tasks):
         tasks = tasks[:nmax]
         print(f"\nLimited to first {nmax} subvolumes (out of {n_subvolumes**3} total)")
+    
     if projection == "3d":
         if parallel and ncores > 1:
             with Pool(processes=ncores) as pool:
@@ -1230,7 +1595,7 @@ def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, red
             empty_subvolumes += 1
     profiles1h_flatten = flatten_profiles(profiles1h)
     profiles2h_flatten = flatten_profiles(profiles2h)
-                   
+
     masses_flatten = flatten_halo_properties(masses)
     m200c_flatten = flatten_halo_properties(ms200c)
     m500c_flatten = flatten_halo_properties(ms500c)
@@ -1242,5 +1607,112 @@ def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, red
     return (profiles1h_flatten, profiles2h_flatten, masses_flatten, m200c_flatten, 
            m500c_flatten, mtophat_flatten, r200c_flatten, r500c_flatten, 
            rtophat_flatten)
-                   
+
+def process_halos(args):
+    task_id, R, basePath, snapNum, projection, axis, R_spacing, idx = args
+
+    profiles1h = np.zeros((len(idx), 6, len(R) - 1))
+    masses = np.zeros(len(idx))
+    ms200c = np.zeros(len(idx))
+    ms500c = np.zeros(len(idx))
+    mstophat = np.zeros(len(idx))
+    rs200c = np.zeros(len(idx))
+    rs500c = np.zeros(len(idx))
+    rstophat = np.zeros(len(idx))
     
+    for i in range(len(idx)):
+        haloID = idx[i]
+        try: 
+            hi = halo(sim = "TNG", basePath = basePath, snapNum = snapNum, haloID = haloID) 
+            hi.generate_profiles(R, projection = projection, triax = False, axis = axis, R_spacing = R_spacing)
+            profiles1h[i] = hi.profiles3D if projection == "3d" else hi.profiles2D
+        except KeyError:
+            profiles1h[i] = np.full((6 ,len(R) - 1), np.nan)
+        masses[i] = hi.Mass
+        ms200c[i] = hi.group["M200c"]
+        ms500c[i] = hi.group["M500c"]
+        mstophat[i] = hi.group["MTopHat"]
+        rs200c[i] = hi.group["R200c"]
+        rs500c[i] = hi.group["R500c"]
+        rstophat[i] = hi.group["RTopHat"]
+    print(f" ({task_id}) => {len(idx)} halos have been processed.")
+    return task_id, profiles1h, masses, ms200c, ms500c, mstophat, rs200c, rs500c, rstophat
+
+def extract_one_halo_term(sim = "TNG", basePath = None, R = None, snapNum = None, parallel = True, redshift = None,
+                          ncores = 1, nchunks = 20, Mmin = None, Mmax = None, projection = "3d", 
+                          axis = ["x","y"], R_spacing = "linear"):
+    
+    if redshift is not None:
+        d = load_redshifts(basePath) 
+        closest_redshift = np.argmin(np.abs(np.array(list(d.values())) - redshift))
+        snapNum = int(list(d.keys())[closest_redshift])  
+    print("Extracting one halo term from snapshot",snapNum)
+    header = il.groupcat.loadHeader(basePath, snapNum)
+    boxSize = header["BoxSize"]
+    print("Loading all available halo")
+    all_available_halos = il.groupcat.loadHalos('../sims.TNG/TNG300-3/output/', 99, 
+                                  fields = ['GroupMass'])
+    masses = all_available_halos*1e10
+    print("Available halos =", len(masses))
+    idx = np.arange(0., len(masses), 1, dtype = np.int32)
+    if Mmin is not None:
+        print(f"  Minimum halo mass set to {Mmin}")
+        mask = np.where(masses >= Mmin)
+        idx = idx[mask]
+        masses = masses[mask]
+        print(f"  New halo lenght = {len(masses)}")
+    if Mmax is not None:
+        print(f"  Maximum halo mass set to {Mmax}")
+        mask = np.where(masses <= Mmax)
+        idx = idx[mask]
+        masses = masses[mask]
+        print(f"  New halo lenght = {len(masses)}")
+    idx = np.array_split(idx, nchunks)
+    
+    profiles1h = np.empty(len(idx), dtype = object)
+    masses = np.empty(len(idx), dtype = object)
+    ms200c = np.empty(len(idx), dtype = object)
+    ms500c = np.empty(len(idx), dtype = object)
+    mstophat = np.empty(len(idx), dtype = object)
+    rs200c = np.empty(len(idx), dtype = object)
+    rs500c = np.empty(len(idx), dtype = object)
+    rstophat = np.empty(len(idx), dtype = object)
+    
+    tasks = []
+    for i,idx_i in enumerate(idx):
+        tasks.append([i, R, basePath, snapNum, projection, axis, R_spacing, idx_i])
+    if parallel == False or ncores == 1:
+        results = []
+        for i in range(len(tasks)):
+            print(f"  Currently running task {i} with {len(tasks[i][-1])} halos.")
+            results.append(process_halos(tasks[i]))
+    elif parallel == True and ncores > 1:
+        with Pool(processes=ncores) as pool:
+            results = pool.map(process_halos, tasks)
+    total_halos = 0 
+    for i, prof1h, mass, m200, m500, mtophat, r200, r500, rtophat in results:
+        profiles1h[i] = np.asarray(prof1h)
+        masses[i] = np.asarray(mass)
+        ms200c[i] = np.asarray(m200)
+        ms500c[i] = np.asarray(m500)
+        mstophat[i] = np.asarray(mtophat)
+        rs200c[i] = np.asarray(r200)
+        rs500c[i] = np.asarray(r500)
+        rstophat[i] = np.asarray(rtophat)
+                   
+        n_halos = len(prof1h) if len(prof1h) > 0 else 0
+        total_halos += n_halos
+    print(f"Total processed halos = {total_halos}")
+    
+    profiles1h_flatten = flatten_profiles_2d(profiles1h, total_halos, 6, len(R) - 1)
+    masses_flatten = flatten_scalars(masses, total_halos)
+    ms200c_flatten = flatten_scalars(ms200c, total_halos)
+    ms500c_flatten = flatten_scalars(ms500c, total_halos)
+    mstophat_flatten = flatten_scalars(mstophat, total_halos)
+    rs200c_flatten = flatten_scalars(rs200c, total_halos)
+    rs500c_flatten = flatten_scalars(rs500c, total_halos)
+    rstophat_flatten = flatten_scalars(rstophat, total_halos)
+    
+    return (profiles1h_flatten, masses_flatten, ms200c_flatten, ms500c_flatten, 
+           mstophat_flatten, rs200c_flatten, rs500c_flatten, rstophat_flatten)
+

@@ -16,9 +16,13 @@ dependencies = [
   "numpy",
   "scipy",
   "matplotlib",
-  "h5py",
   "astropy",
-  "scipy"
+  "emcee",
+  "pyccl",
+  "numba",
+  "corner",
+  "tqdm",
+  "h5py"
 ]
 
 [project.urls]

@@ -7,7 +7,8 @@ from astropy import constants as const
 from astropy import units as u
 import sympy as sp
 import re
-
+from scipy import stats
+from scipy.stats import norm as norm_scipy
 
 #=====numba functions======
 @numba.njit(fastmath = True)
@@ -49,9 +50,9 @@ def process_chunk_numba(r_edges, pos, coords, Masses, e_abundance, u_part,
     n_bins = len(r_edges) - 1
     rchunk = compute_offsets(coords, pos)
     if R_spacing == "linear":
-        inds = compute_bin_indices_linear(rchunk, r_edges.min(), r_edges.max(), len(r_edges))
+        inds = compute_bin_indices_linear(rchunk, r_edges.min(), r_edges.max(), n_bins)
     elif R_spacing == "log":
-        inds = compute_bin_indices_log(rchunk, r_edges.min(), r_edges.max(), len(r_edges))
+        inds = compute_bin_indices_log(rchunk, r_edges.min(), r_edges.max(), n_bins)
     for i in range(len(inds)):
         bin_idx = inds[i]
         if bin_idx >= 0 and bin_idx < n_bins:
@@ -99,13 +100,20 @@ def compute_bin_indices_log(r_values, r_min, r_max, n_bins):
     return indices
 
 @numba.njit(fastmath = True)
-def attach_numba(var, inds, output, counts, n_bins):
+def attach_numba(var, inds, output, n_bins, weights = None):
     for i in range(len(inds)):
         bin_idx = inds[i]
         if bin_idx >= 0 and bin_idx < n_bins:
-            counts[bin_idx]+=1
-            output[bin_idx]+=var[i]
-            
+            if weights is None:
+                output[bin_idx]+=var[i]
+            else:
+                output[bin_idx]+=var[i]*weights[i]
+@numba.njit(fastmath = True)
+def count_numba(var, inds, counts, n_bins):
+    for i in range(len(inds)):
+        bin_idx = inds[i]
+        if bin_idx >= 0 and bin_idx < n_bins:
+            counts[bin_idx]+=1   
 @numba.njit(fastmath=True)
 def compute_offsets(coords, pos):
     N = coords.shape[0]
@@ -227,7 +235,56 @@ def periodic_boundary_condition_fix_coordinates(halo_pos, coordinates_to_fix, bo
 
     return coordinates_to_fix
 
+@numba.njit(fastmath = True)
+def flatten_numeric_array(chunks):
+    total_length = 0
+    for chunk in chunks:
+        total_length += len(chunk)
+    
+    flat_array = np.empty(total_length, dtype=chunks[0].dtype)
+    
+    idx = 0
+    for chunk in chunks:
+        for val in chunk:
+            flat_array[idx] = val
+            idx += 1
+    
+    return flat_array
+
+
+def flatten_scalars(chunks, total_halos):
+    flat_array = np.empty(total_halos, dtype=np.float64)
+    idx = 0
+    for chunk in chunks:
+        for val in chunk:
+            flat_array[idx] = val
+            idx += 1
+    
+    return flat_array
+
+def flatten_profiles_2d(chunks, total_halos, n_fields, n_bins):
+    flat_array = np.empty((total_halos, n_fields, n_bins), dtype=np.float64)
+    
+    idx = 0
+    for chunk in chunks:
+        n_halos_chunk = chunk.shape[0]
+        for i in range(n_halos_chunk):
+            for j in range(n_fields):
+                for k in range(n_bins):
+                    flat_array[idx, j, k] = chunk[i, j, k]
+            idx += 1
+    return flat_array
+
 #=================
+
+def flatten_numeric_results(results, field_idx):
+    chunks = [r[field_idx] for r in results]
+    try:
+        numeric_chunks = [np.asarray(chunk, dtype=np.float64) for chunk in chunks]
+        return flatten_numeric_array(np.array(numeric_chunks, dtype=object))
+    except:
+        return np.concatenate(chunks)
+
 
             
 def compute_radial_bin_indices(r_edges, pos, coords, chunk_size=None):
@@ -381,6 +438,7 @@ def utherm_ne_to_temp(utherm, nelec):
     temp = np.log10(temp)
 
     return temp.astype('float32')
+
 def flatten_halo_properties(properties_3d):
     property_list = []
     
@@ -424,11 +482,44 @@ def get_volume_ops(expr):
 def get_def(expr):   
     pattern = r'(\w+)\s*=>\s*(\w+)\((.*?)\)'
     matches = re.findall(pattern, expr)
-    vars_dict = {}
-    for var, func, args in matches:
-        args = [a.strip() for a in args.split(",")]
-        vars_dict[var] = dict(func = func, args = args)
-    return vars_dict
+    return matches
+
+def parse_expression(expr):
+    expr = expr.strip()
+    func_pattern = r"""
+        ^\s*([A-Za-z_][A-Za-z0-9_]*)        # name
+        \s*=\s*
+        ([A-Za-z_][A-Za-z0-9_]*)            # func
+        \s*\(\s*(.*?)\s*\)\s*$              # args inside ()
+    """
+
+    m = re.match(func_pattern, expr, re.VERBOSE)
+    if m:
+        name = m.group(1)
+        func = m.group(2)
+        args = [a.strip() for a in m.group(3).split(",")] if m.group(3) else []
+        return {
+            "type": "function",
+            "name": name,
+            "func": func,
+            "args": args
+        }
+
+    op_pattern = r"""
+        ^\s*([A-Za-z_][A-Za-z0-9_]*)    # name
+        \s*=\s*(.+)$                    # whole RHS as operation
+    """
+    m = re.match(op_pattern, expr, re.VERBOSE)
+    if m:
+        name = m.group(1)
+        operation = m.group(2).strip()
+        return {
+            "type": "operation",
+            "name": name,
+            "operation": operation
+        }
+
+    return {"error": "String does not match any expected format"}
 
 def random_initial_steps(limits, n, distribution = "uniform", ln_distribution = True,
                 nsamples = 1e4, dist_args = None):
@@ -466,7 +557,48 @@ def pte(chi2, cov, cinv=None, n_samples=10000, return_samples=False, return_real
             output.append(mc)
         return output
 
+def text2latex(param):
+    greek_letters = {"alpha": r"\alpha", "beta": r"\beta", "gamma": r"\gamma",
+                     "delta": r"\delta", "epsilon": r"\epsilon", "zeta": r"\zeta",
+                     "eta": r"\eta", "theta": r"\theta", "iota": r"\iota",
+                     "kappa": r"\kappa", "lambda": r"\lambda", "mu": r"\mu",
+                     "nu": r"\nu", "xi": r"\xi", "omicron": r"o", "pi": r"\pi",
+                     "rho": r"\rho", "sigma": r"\sigma", "tau": r"\tau",
+                     "upsilon": r"\upsilon", "phi": r"\phi", "chi": r"\chi",
+                     "psi": r"\psi", "omega": r"\omega"}
+    if len(param.split("log")) > 1:
+        return "$"+param+"$"
+    if param in greek_letters and param[-1].isdigit() == False:
+        return f"${greek_letters[param]}$"
+    if param.split("_")[0] in greek_letters:
+        return f"${greek_letters[param.split('_')[0]]}_{param.split('_')[1]}$"
+    if param[:-1] in greek_letters and param[-1].isdigit():
+        return f"${greek_letters[param[:-1]]}_{param[-1]}$"
+    elif len(param) > 1 and param[-1].isdigit():
+        return f"${param[:-1]}_{param[-1]}$"
+    elif len(param) > 1:
+        return "$" +param[0] + "_{"+param[1::]+ "}$"
+    else:
+        return param
+    
+def calculate_sigma_intervals(array, sigma):
+    """
+    Calculate the median and +/- sigma intervals of an array.
 
+    Parameters:
+        array (array-like): The input data array.
+        sigma (float): The sigma level (e.g., 1 for 1σ, 2 for 2σ, etc.).
+
+    Returns:
+        tuple: Median, sigma_plus, sigma_minus values.
+    """
+    lower_percentile = 100 * (0.5 - norm_scipy.cdf(-sigma))
+    upper_percentile = 100 * (0.5 + norm_scipy.cdf(-sigma))
+    lower_bound, median, upper_bound = np.percentile(array, [50 - lower_percentile, 50, 100 - (upper_percentile - 50)])
+    sigma_minus = median - lower_bound
+    sigma_plus = upper_bound - median
+
+    return sigma_minus, median, sigma_plus
 
 def flatten_profiles(profiles_3d):
     total_halos = 0

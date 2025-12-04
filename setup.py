@@ -11,12 +11,16 @@ setup(
     package_dir={"": "src"},
     python_requires=">=3.6",
     install_requires=[
-        "numpy",
-        "scipy",
-        "matplotlib",
-        "h5py",
-        "astropy",
-        "scipy"
+          "numpy",
+          "scipy",
+          "matplotlib",
+          "astropy",
+          "emcee",
+          "pyccl",
+          "numba",
+          "corner",
+          "tqdm",
+          "h5py"
     ],
     include_package_data=True,
     url="https://github.com/javierurrutia/stackforge",
