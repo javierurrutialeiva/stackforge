@@ -24,7 +24,7 @@ from tqdm import tqdm
 from scipy.optimize import curve_fit
 import h5py
 
-from .helpers import *
+from helpers import *
  
 
 class halo():
