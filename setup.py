@@ -16,7 +16,6 @@ setup(
           "matplotlib",
           "astropy",
           "emcee",
-          "pyccl",
           "numba",
           "corner",
           "tqdm",

@@ -1,11 +1,35 @@
-Metadata-Version: 1.2
+Metadata-Version: 2.4
 Name: stackforge
-Version: 0.0.1
+Version: 0.1.0
 Summary: A Python package for stacking and analyzing astrophysical profiles from IllustrisTNG simulations.
 Home-page: https://github.com/javierurrutia/stackforge
 Author: Javier Urrutia
-Author-email: javierul@stanford.edu
+Author-email: Javier Urrutia <javierul@stanford.edu>
 License: MIT
-Description: UNKNOWN
-Platform: UNKNOWN
+Project-URL: Homepage, https://github.com/javierurrutia/stackforge
 Requires-Python: >=3.6
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: astropy
+Requires-Dist: emcee
+Requires-Dist: numba
+Requires-Dist: corner
+Requires-Dist: tqdm
+Requires-Dist: h5py
+Dynamic: author
+Dynamic: home-page
+Dynamic: requires-python
+
+<<<<<<< HEAD
+# StackForge
+![Example plot](logo.webp)
+Python3 package to produce stacked profiles of properties around halos and subhalos in `IllustrisTNG` and `Illustris simulations`. 
+To install just clone the reposity and run:
+
+```pip install -e .```
+=======
+# stackforge
+Python3 package to stack properties around halos and subHalos in Illustris and Illustris-TNG simulations.
+>>>>>>> e9b197595880b070313a972047c031f16349c7a6

@@ -127,14 +127,14 @@ class halo():
         return ne
     def separate_into_1h2h(self, R, projection = "3d", triax = False, 
                            snap = None, store = True, mean = 0.,
-                           comoving = False):
+                           comoving = False, R_spacing = "linear"):
         if snap is None:
             snap = il.snapshot.loadSubset(self.basePath, self.snapNum, 'gas', 
                     fields = ["Coordinates","InternalEnergy","ElectronAbundance","Masses"])
-        self.generate_profiles(R, projection, store = True, comoving = comoving)
+        self.generate_profiles(R, projection, store = True, comoving = comoving, R_spacing = R_spacing)
         profiles1h = self.profiles3D if projection == "3d" else self.profiles2D
         self.generate_profiles(R, projection, store = True, use_snap = True, 
-                               snap = snap, triax = triax, comoving = comoving)
+                               snap = snap, triax = triax, comoving = comoving, R_spacing = R_spacing)
         profilesTotal = self.profiles3D if projection == "3d" else self.profiles2D
         profiles2h = profilesTotal - profiles1h
         if store == True:
@@ -815,7 +815,7 @@ class stack():
     def compute_profiles(self, R, projection = "3d", triax = False, 
                              snap = None, mean_subtracted = False,
                              progressBar = True, comoving = False, 
-                             two_halo_term = True):              
+                             two_halo_term = True, R_spacing = "linear"):              
         if snap is None and hasattr(self, "snap"):
             snap = self.snap
         elif snap is None and hasattr(self,"snap") == False:
@@ -831,11 +831,24 @@ class stack():
             h = self.halos[i]
             if two_halo_term == True:
                 h.separate_into_1h2h(R, projection, triax = triax, snap = snap, 
-                                     comoving = comoving)
+                                     comoving = comoving, R_spacing = R_spacing)
             else:
-                h.generate_profiles(R, projection, triax = triax, comoving = comoving)
+                h.generate_profiles(R, projection, triax = triax, comoving = comoving, R_spacing = R_spacing)
             if progressBar == True:
                 pbar.update(1)
+    def filter_by_property(self, attr, vmin , vmax):
+        valid_indices = []
+        halos = self.halos
+        for i,h in enumerate(halos):
+            if attr == "total_mass": 
+                m = h.Mass*1e10
+                if vmin < m < vmax:
+                    valid_indices.append(i)
+            else:
+                p = h.group[attr]
+                if vmin < p < vmax:
+                    valid_indices.append(i)
+        self.halos = [self.halos[i] for i in valid_indices]
     @classmethod
     def selection(cls, sim = "TNG", Mmin = 10, Mmax = 15, **kwargs): 
         if sim == "TNG" or sim == "illustris":
@@ -949,7 +962,10 @@ class sampler():
         free_params = []
         labels = []
         for i,p in enumerate(priors):
-            label, behavior, func, args = p.split("|")
+            if len(p.split("|")) == 4:
+                label, behavior, func, args = p.split("|")
+            else:
+                label, behavior, args = p.split("|")
             args = np.array(args.split(","), dtype = float) if behavior == "free" else float(args)
             labels.append(label)
             if behavior not in ("free", "fixed"):
@@ -989,6 +1005,8 @@ class sampler():
     def run(self, model, nwalkers, nsteps, blobs = True, overwrite = False, 
             output_file = "samples.h5", ncores = 1, likelihood = "gaussian",
             initial_guess = None, use_numba = False, demo = False, folder = None):
+        if "." not in output_file:
+            output_file = f"{output_file}.h5"
         root = self.root
         funcs = importlib.import_module(root)
         if hasattr(self, "prior_funcs") == False:
@@ -1229,7 +1247,7 @@ class sampler():
         elif demo == False:
             EnsembleSampler.run_mcmc(initial_guess, nsteps, progress=True, store = True) 
     @classmethod
-    def load(cls, folder):
+    def load(cls, folder, load_chain = True):
         folder = folder + "/" if folder[-1] != "/" else folder
         x = np.loadtxt(folder + "x.txt")
         y = np.loadtxt(folder + "y.txt")
@@ -1237,16 +1255,17 @@ class sampler():
         files = os.listdir(folder)
         out = cls(x, y, cov)
         out.folder = folder
-        for f in files:
-            if "samples" in f:
-                try:
-                    chain, blobs = out.load_chain(folder + f, load_blobs = True)
-                    out.filename = folder + f
-                    return out, chain, blobs
-                except:
-                    chain = out.load_chain(folder + f, load_blobs = False)
-                    out.filename = folder + f
-                    return out, chain
+        if load_chain == True:
+            for f in files:
+                if ".h5" in f:
+                    try:
+                        chain, blobs = out.load_chain(folder + f, load_blobs = True)
+                        out.filename = folder + f
+                        return out, chain, blobs
+                    except:
+                        chain = out.load_chain(folder + f, load_blobs = False)
+                        out.filename = folder + f
+                        return out, chain
         return out
     def load_chain(self, filename = None, load_blobs = True, discard = 0, thin = 1):
         filename = self.filename if hasattr(self, "filename") else filename
@@ -1261,8 +1280,8 @@ class sampler():
                     plot_priors = True, discard = 0, thin = 1, **kwargs):
         root = self.root
         funcs = importlib.import_module(root)
-        
-        labels = self.labels
+        prior_behaviors = self.prior_behaviors
+        labels = [self.labels[i] for i in range(len(self.labels)) if prior_behaviors[i] == "free"]
         ndims = len(labels)
         figsize = kwargs.get("figsize", (5*len(labels), 5*len(labels)))
         fig = plt.figure(figsize = figsize) if fig is None else fig
@@ -1453,18 +1472,16 @@ def _worker(r_edges, pos ,coords, Masses, e_abundance, u_part, chunk_size, facto
     return mass_sum, count, E_sum, U_sum
 
 def process_subvolume(args):  
-    i, j, k, pos, basePath, snapNum, R_subvolume, sub_volume_size, redshift, sim, R, fix_boundary_condition, geometry = args
-
+    i, j, k, pos, basePath, snapNum, R_subvolume, sub_volume_size, redshift, sim, R, fix_boundary_condition, geometry, R_spacing = args
     while True:
         subvolume, halos = load_sub_volume(basePath, snapNum, 'gas', pos = pos, 
                             boxSize = R_subvolume, load_halos = True, redshift = redshift, 
                             verbose = False, 
                             fields = ['Coordinates','Masses','ElectronAbundance', 'InternalEnergy'], 
                             rmax = sub_volume_size, geometry = geometry, 
-                            fix_boundary_condition = fix_boundary_condition, 
-                            load_only_halos = load_only_halos)
+                            fix_boundary_condition = fix_boundary_condition)
         s = stack(sim = "TNG", basePath = basePath, haloIDs = halos, redshift=redshift, snap = subvolume)
-        s.compute_1h2hprofiles(R, comoving = True, progressBar = False)
+        s.compute_profiles(R, comoving = True, progressBar = False, R_spacing = R_spacing, two_halo_term = True)
 
         profiles1h_ijk = np.array([h.profiles1h for h in s.halos])
         profiles2h_ijk = np.array([h.profiles2h for h in s.halos])
@@ -1482,18 +1499,18 @@ def process_subvolume(args):
         return (i, j, k, profiles1h_ijk, profiles2h_ijk, masses,
                m200c, m500c, MTopHat, R200c, R500c, RTopHat)           
 def process_subarea(args):
-    i, j, k, basePath, snapNum, R_subvolume, sub_volume_size, redshift, sim, R, fix_boundary_condition, geometry, two_halo_term, axis = args
+    i, j, k, basePath, snapNum, R_subvolume, sub_volume_size, redshift, sim, R, fix_boundary_condition, geometry, axis, R_spacing = args
     subarea, halos = load_sub_area(basePath, snapNum, 'gas', pos = pos, boxSize = R_subvolume, load_halos = True,
                                   redshift = redshift, fields = ['Coordinates','Masses','ElectronAbundance', 'InternalEnergy'],
                                   rmax = sub_volume_size, geometry = geometry, fix_boundary_condition = fix_boundary_condition,
                                   axis = axis)
     s = stack(sim = "TNG", basePath = basePath, haloIDs = halos, redshift=redshift, snap = subarea)
-    s.compute_1h2hprofiles(R, comoving = True, progressBar = False, projection = "2d")
+    s.compute_1h2hprofiles(R, comoving = True, progressBar = False, projection = "2d", two_halo_term = True, R_spacing = R_spacing)
 
     profiles1h_ijk = np.array([h.profiles1h for h in s.halos])
     profiles2h_ijk = np.array([h.profiles2h for h in s.halos])
 
-    print(f"  Subvolume ({i},{j},{k}): {len(halos)} halos processed")
+    print(f"  Subarea ({i},{j},{k}): {len(halos)} halos processed")
     masses = [h.Mass for h in s.halos]
     m200c = [h.group["M200c"] for h in s.halos]
     m500c = [h.group["M500c"] for h in s.halos]
@@ -1508,7 +1525,7 @@ def process_subarea(args):
 
 def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, redshift = None,
                      n_subvolumes = 100, parallel = False, ncores = 1, nmax = None, fix_boundary_condition = False,
-                     geometry = "sphere", projection = "3d", axis = ["x","y"], two_halo_term = True):
+                     geometry = "sphere", projection = "3d", axis = ["x","y"], R_spacing = "linear"):
     if redshift is not None:
         d = load_redshifts(basePath) 
         closest_redshift = np.argmin(np.abs(np.array(list(d.values())) - redshift))
@@ -1525,7 +1542,6 @@ def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, red
     dy += sub_volume_size / 2
     dz += sub_volume_size / 2
     R_subvolume = 1.5*np.max(R) + sub_volume_size
-    
     profiles1h = np.empty((n_subvolumes, n_subvolumes, n_subvolumes), dtype=object)
     profiles2h = np.empty((n_subvolumes, n_subvolumes, n_subvolumes), dtype=object)
     masses = np.empty((n_subvolumes, n_subvolumes, n_subvolumes), dtype=object)
@@ -1544,11 +1560,11 @@ def process_snapshot(sim = "TNG", basePath = None, R = None, snapNum = None, red
                 if projection == "3d":
                     tasks.append((i, j, k, pos, basePath, snapNum, R_subvolume, 
                             sub_volume_size, redshift, sim, R, fix_boundary_condition,
-                            geometry))
+                            geometry, R_spacing))
                 elif projection == "2d":
                     tasks.append((i, j, k, pos, basePath, snapNum, R_subvolume, 
                             sub_volume_size, redshift, sim, R, fix_boundary_condition,
-                            geometry, axis))  
+                            geometry, axis, R_spacing))  
                     
     print(f"\nProcessing {len(tasks)} subvolumes...\n")
     if nmax is not None and nmax < len(tasks):
@@ -1650,7 +1666,7 @@ def extract_one_halo_term(sim = "TNG", basePath = None, R = None, snapNum = None
     header = il.groupcat.loadHeader(basePath, snapNum)
     boxSize = header["BoxSize"]
     print("Loading all available halo")
-    all_available_halos = il.groupcat.loadHalos('../sims.TNG/TNG300-3/output/', 99, 
+    all_available_halos = il.groupcat.loadHalos(basePath, snapNum, 
                                   fields = ['GroupMass'])
     masses = all_available_halos*1e10
     print("Available halos =", len(masses))

@@ -1,6 +1,9 @@
 numpy
 scipy
 matplotlib
-h5py
 astropy
-scipy
+emcee
+numba
+corner
+tqdm
+h5py

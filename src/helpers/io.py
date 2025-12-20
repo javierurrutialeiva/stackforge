@@ -399,9 +399,8 @@ def load_sub_volume(basePath, snapNum = None, partType='gas',
                 del coords
         del cached_masks
         gc.collect()
-        if load_halos == False:
-            return result
-    elif load_halos == True or load_only_halos == True:
+        
+    if load_halos == True or load_only_halos == True:
         if halo_fields is not None:
             if type(halo_fields) is str:
                 halo_fields = [halo_fields]
@@ -413,10 +412,12 @@ def load_sub_volume(basePath, snapNum = None, partType='gas',
         all_halos = il.groupcat.loadHalos(basePath, snapNum, fields = halo_fields)
         GroupPos = all_halos["GroupPos"]
         mask = compute_mask(GroupPos, pos, rmax, geometry)
-        idx = np.where(mask == True)[0]
+        halo_idx = np.where(mask == True)[0]
         if verbose == True:
-            print(f"  {len(idx)} halos were extracted from sub-volume!")
+            print(f"  {len(halo_idx)} halos were extracted from sub-volume!")
         if load_only_halos == True:
-            return idx
-        return result, idx
-
+            return halo_idx
+        else:
+            return result, halo_idx
+    else:
+        return result
